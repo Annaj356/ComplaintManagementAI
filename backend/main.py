@@ -1,5 +1,5 @@
-
 import os
+
 import logging
 import requests
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks

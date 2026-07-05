@@ -53,3 +53,25 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
+
+def create_action_token(complaint_id: int, action: str) -> str:
+    payload = {
+        "complaint_id": complaint_id,
+        "action": action,
+        "purpose": "status_update",
+        "exp": datetime.now(UTC) + timedelta(days=7),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def verify_action_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="This link has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid or tampered link")
+
+    if payload.get("purpose") != "status_update":
+        raise HTTPException(status_code=400, detail="Invalid link")
+
+    return payload

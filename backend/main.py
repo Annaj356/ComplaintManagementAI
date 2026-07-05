@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 import os
 import logging
 import requests
@@ -329,7 +329,6 @@ def update_status(
     )
 
     return {"message": "Status updated"}
-=======
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
@@ -577,4 +576,3 @@ def update_status(id: int, data: StatusUpdateRequest, db=Depends(get_db)):
     return {
         "message": "Status updated"
     }
->>>>>>> 45d8bc0121f9aff758b3155930da15098b4028af

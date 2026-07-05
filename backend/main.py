@@ -1,5 +1,4 @@
 import os
-
 import logging
 import requests
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
@@ -14,11 +13,19 @@ import ai_service
 from database import get_connection
 from auth import create_token, get_current_user, require_admin
 
+from auth import (
+    create_token,
+    get_current_user,
+    require_admin,
+    create_action_token,
+    verify_action_token,
+)
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+BASE_URL = os.getenv("BASE_URL")
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
     "https://jefrymammen.app.n8n.cloud/webhook/complaint-email",
@@ -157,22 +164,40 @@ def get_me(current_user: dict = Depends(get_current_user), db=Depends(get_db)):
 # N8N NOTIFICATIONS (BACKGROUND TASKS)
 # =========================
 def send_n8n_notification(user: dict, title: str, location: str, department: str, priority: str, complaint_id: int):
+    departmentemail_map = {
+        "Maintenance Team": "jefrymammen3065@gmail.com",
+        "IT Cell": "jefrymammen.b23cs1235@mbcet.ac.in",
+        "Civil Maintenance": "annajose.b23cs1215@mbcet.ac.in",
+        "Estate Office": "krishnavenideepak.b23cs1240@mbcet.ac.in",
+        "Housekeeping": "krishnarajeev.b23cs1239@mbcet.ac.in"
+    }
+
+    department_email = departmentemail_map.get(department)
+
+    in_progress_token = create_action_token(complaint_id, "In Progress")
+    resolved_token = create_action_token(complaint_id, "Resolved")
+    in_progress_link = f"{BASE_URL}/update-status-link?token={in_progress_token}"
+    resolved_link = f"{BASE_URL}/update-status-link?token={resolved_token}"
+
     try:
         logger.info(f"Sending complaint #{complaint_id} to n8n...")
         response = requests.post(
-            N8N_WEBHOOK_URL,
-            headers={"X-Webhook-Secret": N8N_SHARED_SECRET},
-            json={
-                "name": user["name"],
-                "email": user["email"],
-                "title": title,
-                "location": location,
-                "department": department,
-                "priority": priority,
-                "complaint_id": complaint_id,
-            },
-            timeout=10,
-        )
+        N8N_WEBHOOK_URL,
+        headers={"X-Webhook-Secret": N8N_SHARED_SECRET},
+        json={
+            "name": user["name"],
+            "email": user["email"],
+            "title": title,
+            "location": location,
+            "department": department,
+            "priority": priority,
+            "complaint_id": complaint_id,
+            "department_email": department_email,
+            "in_progress_link": in_progress_link,
+            "resolved_link": resolved_link,
+        },
+        timeout=10,
+    )
         logger.info(f"n8n response — status {response.status_code}: {response.text}")
     except requests.exceptions.RequestException as e:
         logger.error(f"n8n notification failed for complaint #{complaint_id}: {e}")
@@ -203,6 +228,7 @@ def send_status_update_notification(
     except requests.exceptions.RequestException as e:
         logger.error(f"n8n status-update notification failed for complaint #{complaint_id}: {e}")
 
+    
 
 # =========================
 # CREATE COMPLAINT (AI POWERED)

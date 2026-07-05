@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Enum, func
 )
@@ -53,7 +53,7 @@ class Complaint(Base):
       email = Column(String(150), unique=True)
       password_hash = Column(String(255))
       role = Column(String(50), default="user")
-=======
+
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Enum, func
 )
@@ -108,5 +108,4 @@ class Complaint(Base):
       email = Column(String(150), unique=True)
       password_hash = Column(String(255))
       role = Column(String(50), default="user")
->>>>>>> 45d8bc0121f9aff758b3155930da15098b4028af
       complaints = relationship("Complaint", back_populates="user")  

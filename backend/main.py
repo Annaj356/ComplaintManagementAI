@@ -3,20 +3,17 @@ import logging
 import requests
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr, Field
-from typing import Literal
 import bcrypt
 import mysql.connector
 from dotenv import load_dotenv
 
 import ai_service
 from database import get_connection
-from auth import create_token, get_current_user, require_admin
-
 from auth import (
     create_token,
     get_current_user,
-    require_admin,
     create_action_token,
     verify_action_token,
 )
@@ -25,6 +22,7 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 BASE_URL = os.getenv("BASE_URL")
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
@@ -32,6 +30,11 @@ N8N_WEBHOOK_URL = os.getenv(
 )
 N8N_STATUS_WEBHOOK_URL = os.getenv("N8N_STATUS_WEBHOOK_URL")
 N8N_SHARED_SECRET = os.getenv("N8N_SHARED_SECRET")
+
+if not BASE_URL:
+    logger.warning("BASE_URL is not set — action links in emails will be broken")
+if not N8N_STATUS_WEBHOOK_URL:
+    logger.warning("N8N_STATUS_WEBHOOK_URL is not set — student status-update emails will be skipped")
 
 app = FastAPI()
 
@@ -75,10 +78,6 @@ class ComplaintRequest(BaseModel):
     description: str = Field(min_length=1, max_length=2000)
     location: str = Field(min_length=1, max_length=100)
     # user_id intentionally NOT here — derived from the verified JWT instead
-
-
-class StatusUpdateRequest(BaseModel):
-    status: Literal["Submitted", "In Progress", "Resolved", "Rejected"]
 
 
 # =========================
@@ -169,7 +168,7 @@ def send_n8n_notification(user: dict, title: str, location: str, department: str
         "IT Cell": "jefrymammen.b23cs1235@mbcet.ac.in",
         "Civil Maintenance": "annajose.b23cs1215@mbcet.ac.in",
         "Estate Office": "krishnavenideepak.b23cs1240@mbcet.ac.in",
-        "Housekeeping": "krishnarajeev.b23cs1239@mbcet.ac.in"
+        "Housekeeping": "krishnarajeev.b23cs1239@mbcet.ac.in",
     }
 
     department_email = departmentemail_map.get(department)
@@ -182,22 +181,22 @@ def send_n8n_notification(user: dict, title: str, location: str, department: str
     try:
         logger.info(f"Sending complaint #{complaint_id} to n8n...")
         response = requests.post(
-        N8N_WEBHOOK_URL,
-        headers={"X-Webhook-Secret": N8N_SHARED_SECRET},
-        json={
-            "name": user["name"],
-            "email": user["email"],
-            "title": title,
-            "location": location,
-            "department": department,
-            "priority": priority,
-            "complaint_id": complaint_id,
-            "department_email": department_email,
-            "in_progress_link": in_progress_link,
-            "resolved_link": resolved_link,
-        },
-        timeout=10,
-    )
+            N8N_WEBHOOK_URL,
+            headers={"X-Webhook-Secret": N8N_SHARED_SECRET},
+            json={
+                "name": user["name"],
+                "email": user["email"],
+                "title": title,
+                "location": location,
+                "department": department,
+                "priority": priority,
+                "complaint_id": complaint_id,
+                "department_email": department_email,
+                "in_progress_link": in_progress_link,
+                "resolved_link": resolved_link,
+            },
+            timeout=10,
+        )
         logger.info(f"n8n response — status {response.status_code}: {response.text}")
     except requests.exceptions.RequestException as e:
         logger.error(f"n8n notification failed for complaint #{complaint_id}: {e}")
@@ -228,7 +227,6 @@ def send_status_update_notification(
     except requests.exceptions.RequestException as e:
         logger.error(f"n8n status-update notification failed for complaint #{complaint_id}: {e}")
 
-    
 
 # =========================
 # CREATE COMPLAINT (AI POWERED)
@@ -312,19 +310,26 @@ def get_complaints(
 
 
 # =========================
-# UPDATE STATUS (ADMIN ONLY)
+# UPDATE STATUS VIA EMAIL LINK (no login — the signed token IS the auth)
 # =========================
-@app.put("/complaint/{id}")
-def update_status(
-    id: int,
-    data: StatusUpdateRequest,
+@app.get("/update-status-link", response_class=HTMLResponse)
+def update_status_via_link(
+    token: str,
     background_tasks: BackgroundTasks,
     db=Depends(get_db),
-    current_user: dict = Depends(require_admin),
 ):
     conn, cursor = db
 
-    # Fetch complaint + student info BEFORE updating, so we know who to notify
+    try:
+        payload = verify_action_token(token)
+    except Exception as e:
+        logger.error(f"Invalid or expired action token: {e}")
+        raise HTTPException(status_code=400, detail="Invalid or expired link")
+
+    complaint_id = payload["complaint_id"]
+    new_status = payload["action"]  # "In Progress" or "Resolved"
+
+    # Fetch complaint + student info (needed for the second n8n notification)
     cursor.execute(
         """
         SELECT c.title, u.email AS student_email, u.name AS student_name
@@ -332,26 +337,35 @@ def update_status(
         JOIN users u ON c.user_id = u.id
         WHERE c.id = %s
         """,
-        (id,),
+        (complaint_id,),
     )
     complaint = cursor.fetchone()
 
     if not complaint:
         raise HTTPException(status_code=404, detail="Complaint not found")
 
-    cursor.execute("UPDATE complaints SET status=%s WHERE id=%s", (data.status, id))
+    cursor.execute(
+        "UPDATE complaints SET status=%s WHERE id=%s",
+        (new_status, complaint_id),
+    )
     conn.commit()
 
-    logger.info(f"Complaint #{id} status updated to '{data.status}' by admin {current_user['user_id']}")
+    logger.info(f"Complaint #{complaint_id} status updated to '{new_status}' via email link")
 
-    # Fire-and-forget — notify the student their status changed
     background_tasks.add_task(
         send_status_update_notification,
         complaint["student_email"],
         complaint["student_name"],
         complaint["title"],
-        id,
-        data.status,
+        complaint_id,
+        new_status,
     )
 
-    return {"message": "Status updated"}
+    return f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 60px;">
+            <h2>Status Updated ✅</h2>
+            <p>Complaint #{complaint_id} has been marked as <b>{new_status}</b>.</p>
+        </body>
+    </html>
+    """

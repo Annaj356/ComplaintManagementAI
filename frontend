@@ -1,0 +1,669 @@
+import React, { useState, useEffect, useCallback } from "react";
+import {
+  Ticket, ClipboardList, LogOut, LogIn, UserPlus, Send, Loader2,
+  AlertCircle, CheckCircle2, MapPin, Building2, Settings2, X, User, Plus
+} from "lucide-react";
+
+const DEPT_LABEL = {
+  "Maintenance Team": "Maintenance",
+  "IT Cell": "IT Cell",
+  "Civil Maintenance": "Civil",
+  "Estate Office": "Estate Office",
+  "Housekeeping": "Housekeeping",
+};
+
+const STATUS_STYLE = {
+  "Submitted": { bg: "var(--line)", ink: "var(--ink-soft)", bar: "var(--ink-soft)" },
+  "In Progress": { bg: "var(--accent-soft)", ink: "var(--accent)", bar: "var(--accent)" },
+  "Resolved": { bg: "var(--success-soft)", ink: "var(--success)", bar: "var(--success)" },
+};
+
+const PRIORITY_STYLE = {
+  "High": "var(--urgent)",
+  "Medium": "var(--accent)",
+  "Low": "var(--success)",
+};
+
+function StatusBadge({ text, style }) {
+  return (
+    <span
+      className="status-pill"
+      style={{
+        background: style?.bg || "var(--line)",
+        color: style?.ink || "var(--ink)",
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
+function TicketCard({ c }) {
+  const statusStyle = STATUS_STYLE[c.status] || STATUS_STYLE["Submitted"];
+  return (
+    <div className="ticket-card">
+      <div className="ticket-card-accent" style={{ background: statusStyle.bar }} aria-hidden="true" />
+      <div className="ticket-card-body">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="mono eyebrow">REF-{String(c.id).padStart(5, "0")}</div>
+            <h3 className="ticket-title">{c.title}</h3>
+          </div>
+          <StatusBadge text={c.status} style={statusStyle} />
+        </div>
+        <p className="ticket-desc">{c.description}</p>
+        <div className="ticket-meta">
+          <span className="meta-item">
+            <MapPin size={13} strokeWidth={2.25} /> {c.location}
+          </span>
+          {c.department && (
+            <span className="meta-item">
+              <Building2 size={13} strokeWidth={2.25} /> {DEPT_LABEL[c.department] || c.department}
+            </span>
+          )}
+          {c.priority && (
+            <span
+              className="meta-item mono"
+              style={{ color: PRIORITY_STYLE[c.priority] || "var(--ink)", fontWeight: 700 }}
+            >
+              {c.priority} priority
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [baseUrl, setBaseUrl] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [urlDraft, setUrlDraft] = useState("");
+
+  const [token, setToken] = useState("");
+  const [me, setMe] = useState(null);
+
+  const [authMode, setAuthMode] = useState("login"); // login | signup
+  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState("");
+
+  const [tab, setTab] = useState("new"); // new | mine
+  const [complaintForm, setComplaintForm] = useState({ title: "", location: "", description: "" });
+  const [submitLoading, setSubmitLoading] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const [lastResult, setLastResult] = useState(null);
+
+  const [myTickets, setMyTickets] = useState([]);
+  const [ticketsLoading, setTicketsLoading] = useState(false);
+  const [ticketsError, setTicketsError] = useState("");
+
+  // ---- restore persisted config/session ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const u = await window.storage.get("config:apiBaseUrl");
+        if (u?.value) { setBaseUrl(u.value); setUrlDraft(u.value); }
+      } catch { setShowSettings(true); }
+      try {
+        const t = await window.storage.get("auth:token");
+        if (t?.value) setToken(t.value);
+      } catch {}
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!baseUrl) setShowSettings(true);
+  }, [baseUrl]);
+
+  const saveBaseUrl = async () => {
+    const cleaned = urlDraft.trim().replace(/\/+$/, "");
+    setBaseUrl(cleaned);
+    try { await window.storage.set("config:apiBaseUrl", cleaned); } catch {}
+    setShowSettings(false);
+  };
+
+  const api = useCallback(async (path, opts = {}) => {
+    const res = await fetch(`${baseUrl}${path}`, {
+      ...opts,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(opts.headers || {}),
+      },
+    });
+    let body = null;
+    try { body = await res.json(); } catch {}
+    if (!res.ok) {
+      throw new Error(body?.detail || `Request failed (${res.status})`);
+    }
+    return body;
+  }, [baseUrl, token]);
+
+  // ---- fetch /me whenever we have a token ----
+  useEffect(() => {
+    if (!token || !baseUrl) return;
+    (async () => {
+      try {
+        const user = await api("/me");
+        setMe(user);
+      } catch (e) {
+        setToken("");
+        setMe(null);
+        try { await window.storage.delete("auth:token"); } catch {}
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, baseUrl]);
+
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError("");
+    setAuthLoading(true);
+    try {
+      if (authMode === "signup") {
+        await api("/signup", { method: "POST", body: JSON.stringify(authForm) });
+        // auto-login right after signup
+        const login = await api("/login", {
+          method: "POST",
+          body: JSON.stringify({ email: authForm.email, password: authForm.password }),
+        });
+        setToken(login.access_token);
+        try { await window.storage.set("auth:token", login.access_token); } catch {}
+      } else {
+        const login = await api("/login", {
+          method: "POST",
+          body: JSON.stringify({ email: authForm.email, password: authForm.password }),
+        });
+        setToken(login.access_token);
+        try { await window.storage.set("auth:token", login.access_token); } catch {}
+      }
+      setAuthForm({ name: "", email: "", password: "" });
+    } catch (err) {
+      setAuthError(err.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    setToken("");
+    setMe(null);
+    setMyTickets([]);
+    try { await window.storage.delete("auth:token"); } catch {}
+  };
+
+  const handleComplaintSubmit = async (e) => {
+    e.preventDefault();
+    setSubmitError("");
+    setSubmitLoading(true);
+    setLastResult(null);
+    try {
+      const res = await api("/complaint", { method: "POST", body: JSON.stringify(complaintForm) });
+      setLastResult(res);
+      setComplaintForm({ title: "", location: "", description: "" });
+    } catch (err) {
+      setSubmitError(err.message);
+    } finally {
+      setSubmitLoading(false);
+    }
+  };
+
+  const loadMyTickets = useCallback(async () => {
+    if (!me) return;
+    setTicketsLoading(true);
+    setTicketsError("");
+    try {
+      const all = await api("/complaints?limit=200&offset=0");
+      setMyTickets((all || []).filter((c) => c.user_id === me.id));
+    } catch (err) {
+      setTicketsError(err.message);
+    } finally {
+      setTicketsLoading(false);
+    }
+  }, [api, me]);
+
+  useEffect(() => {
+    if (tab === "mine" && me) loadMyTickets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, me]);
+
+  const authed = !!(token && me);
+
+  return (
+    <div className="cd-root">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+        .cd-root {
+          --ink: #16213A;
+          --ink-soft: #5B6577;
+          --ink-faint: #8B93A1;
+          --paper: #F4F5F7;
+          --panel: #FFFFFF;
+          --accent: #2F5D8A;
+          --accent-soft: #E7EEF4;
+          --urgent: #A03D3D;
+          --urgent-soft: #F6E9E9;
+          --success: #2E6B4F;
+          --success-soft: #E9F2ED;
+          --line: #E1E4E9;
+          --line-strong: #CBD1D9;
+          --radius: 10px;
+          --shadow-sm: 0 1px 2px rgba(22,33,58,0.05);
+          --shadow-md: 0 4px 14px rgba(22,33,58,0.07);
+          --shadow-lg: 0 12px 32px rgba(22,33,58,0.12);
+          min-height: 100vh;
+          width: 100%;
+          background: var(--paper);
+          color: var(--ink);
+          font-family: 'Inter', sans-serif;
+          display: flex;
+          flex-direction: column;
+          -webkit-font-smoothing: antialiased;
+        }
+        .mono { font-family: 'IBM Plex Mono', monospace; }
+        .display { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.01em; }
+
+        .cd-topbar {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 13px 24px; border-bottom: 1px solid var(--line);
+          background: var(--panel); box-shadow: var(--shadow-sm); position: relative; z-index: 2;
+        }
+        .cd-brand { display: flex; align-items: center; gap: 10px; }
+        .cd-brand-mark {
+          width: 32px; height: 32px; border-radius: 8px; background: var(--ink);
+          display: flex; align-items: center; justify-content: center; color: #fff;
+          flex-shrink: 0; box-shadow: var(--shadow-sm);
+        }
+        .cd-brand-text .eyebrow { font-size: 9.5px; letter-spacing: 0.15em; color: var(--ink-faint); }
+        .cd-brand-text h1 { font-size: 17px; margin: 0; line-height: 1.2; font-weight: 600; }
+
+        .eyebrow { text-transform: uppercase; letter-spacing: 0.12em; font-size: 10.5px; font-weight: 600; color: var(--ink-faint); }
+
+        .icon-btn {
+          display: inline-flex; align-items: center; gap: 6px;
+          border: 1px solid var(--line); background: var(--panel); color: var(--ink-soft);
+          padding: 7px 12px; border-radius: 7px; font-size: 12.5px; font-weight: 600;
+          cursor: pointer; transition: border-color .15s ease, color .15s ease, box-shadow .15s ease;
+        }
+        .icon-btn:hover { border-color: var(--line-strong); color: var(--ink); box-shadow: var(--shadow-sm); }
+
+        .cd-body { flex: 1; display: flex; min-height: 0; }
+
+        .cd-nav {
+          width: 200px; flex-shrink: 0; border-right: 1px solid var(--line);
+          background: var(--panel); padding: 20px 14px; display: flex; flex-direction: column; gap: 2px;
+        }
+        .nav-item {
+          display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 7px;
+          font-size: 13.5px; font-weight: 500; color: var(--ink-soft); cursor: pointer;
+          background: transparent; border: none; border-left: 2.5px solid transparent; text-align: left; width: 100%;
+          transition: background .15s ease, color .15s ease;
+        }
+        .nav-item svg { opacity: 0.75; flex-shrink: 0; }
+        .nav-item:hover { background: var(--paper); color: var(--ink); }
+        .nav-item.active { background: var(--accent-soft); color: var(--accent); border-left-color: var(--accent); font-weight: 600; }
+        .nav-item.active svg { opacity: 1; }
+
+        .cd-main { flex: 1; padding: 34px 40px; overflow-y: auto; }
+
+        .section-head { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+        .section-head-icon {
+          width: 34px; height: 34px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line);
+          display: flex; align-items: center; justify-content: center; color: var(--accent); flex-shrink: 0;
+          box-shadow: var(--shadow-sm);
+        }
+        .section-head h2 { font-size: 19px; margin: 0; font-weight: 600; }
+        .section-head .eyebrow { display: block; margin-bottom: 2px; }
+
+        .panel {
+          background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 26px; max-width: 640px; box-shadow: var(--shadow-md);
+        }
+
+        .field-label { font-size: 12px; font-weight: 600; color: var(--ink-soft); margin-bottom: 6px; display: block; }
+        .field-input, .field-textarea {
+          width: 100%; border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px;
+          font-size: 14px; font-family: 'Inter', sans-serif; color: var(--ink); background: #fff;
+          outline: none; transition: border-color .15s ease, box-shadow .15s ease;
+        }
+        .field-input:focus, .field-textarea:focus {
+          border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .field-textarea { resize: vertical; min-height: 108px; line-height: 1.5; }
+
+        .btn-primary {
+          display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+          background: var(--ink); color: #fff; border: none; border-radius: 7px;
+          padding: 10.5px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+          transition: background .15s ease, box-shadow .15s ease, transform .1s ease; width: 100%;
+          box-shadow: var(--shadow-sm);
+        }
+        .btn-primary:hover { background: #223252; box-shadow: var(--shadow-md); }
+        .btn-primary:active { transform: translateY(1px); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; transform: none; }
+
+        .btn-link { background: none; border: none; color: var(--ink-soft); font-size: 13px; cursor: pointer; text-decoration: underline; padding: 0; }
+
+        .banner {
+          display: flex; align-items: flex-start; gap: 8px; padding: 11px 13px; border-radius: 8px;
+          font-size: 13px; margin-top: 14px; line-height: 1.45;
+        }
+        .banner-error { background: var(--urgent-soft); color: var(--urgent); border: 1px solid rgba(160,61,61,0.2); }
+        .banner-success { background: var(--success-soft); color: var(--success); border: 1px solid rgba(46,107,79,0.2); }
+
+        .status-pill {
+          font-family: 'Inter', sans-serif; font-weight: 600; font-size: 11.5px;
+          letter-spacing: 0.01em; padding: 4px 11px; border-radius: 999px;
+          white-space: nowrap; flex-shrink: 0;
+        }
+
+        .ai-tag {
+          display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600;
+          padding: 5px 11px; border-radius: 6px; background: #fff; border: 1px solid var(--line); margin: 3px 6px 0 0;
+        }
+
+        .ticket-card {
+          display: flex; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          overflow: hidden; margin-bottom: 12px; box-shadow: var(--shadow-sm);
+          transition: box-shadow .15s ease, border-color .15s ease;
+        }
+        .ticket-card:hover { box-shadow: var(--shadow-md); border-color: var(--line-strong); }
+        .ticket-card-accent { width: 4px; flex-shrink: 0; }
+        .ticket-card-body { flex: 1; padding: 17px 22px; }
+        .ticket-title { font-family: 'Space Grotesk', sans-serif; font-size: 15.5px; font-weight: 600; margin: 4px 0 8px; }
+        .ticket-desc { font-size: 13.5px; color: var(--ink-soft); line-height: 1.55; margin-bottom: 13px; }
+        .ticket-meta { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--ink-soft); }
+        .meta-item { display: flex; align-items: center; gap: 5px; }
+
+        .empty-state {
+          text-align: center; padding: 56px 20px; color: var(--ink-soft);
+        }
+        .empty-state-icon {
+          width: 48px; height: 48px; border-radius: 50%; background: var(--panel); border: 1px solid var(--line);
+          display: flex; align-items: center; justify-content: center; margin: 0 auto 14px; color: var(--ink-faint);
+        }
+
+        .auth-shell {
+          min-height: 100vh; width: 100%; display: flex;
+        }
+        .auth-visual {
+          flex: 1; background: var(--ink); color: #fff; display: flex; flex-direction: column;
+          justify-content: space-between; padding: 44px; position: relative; overflow: hidden;
+        }
+        .auth-visual::before {
+          content: ""; position: absolute; inset: 0;
+          background-image: radial-gradient(circle at 1.5px 1.5px, rgba(255,255,255,0.09) 1.5px, transparent 0);
+          background-size: 26px 26px; opacity: 0.5;
+        }
+        .auth-visual-content { position: relative; z-index: 1; }
+        .auth-visual-mark {
+          width: 40px; height: 40px; border-radius: 9px; background: rgba(255,255,255,0.1);
+          display: flex; align-items: center; justify-content: center; margin-bottom: 22px;
+        }
+        .auth-visual h2 { font-family: 'Space Grotesk', sans-serif; font-size: 27px; font-weight: 600; margin: 0 0 12px; line-height: 1.25; max-width: 360px; }
+        .auth-visual p { font-size: 14px; color: rgba(255,255,255,0.62); line-height: 1.6; max-width: 340px; }
+        .auth-visual-foot { position: relative; z-index: 1; font-size: 12px; color: rgba(255,255,255,0.4); }
+
+        .auth-form-side {
+          flex: 1; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--paper);
+        }
+        .auth-card {
+          width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 14px; padding: 32px 30px; box-shadow: var(--shadow-lg);
+        }
+        .auth-toggle { display: flex; gap: 4px; margin-bottom: 22px; background: var(--paper); padding: 4px; border-radius: 9px; }
+        .auth-toggle button {
+          flex: 1; padding: 8px; border-radius: 6px; border: none; background: transparent;
+          font-size: 13px; font-weight: 600; color: var(--ink-soft); cursor: pointer; transition: all .15s ease;
+        }
+        .auth-toggle button.active { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-sm); }
+
+        .settings-overlay {
+          position: fixed; inset: 0; background: rgba(22,33,58,0.5); backdrop-filter: blur(2px); display: flex;
+          align-items: center; justify-content: center; z-index: 50; padding: 20px;
+        }
+        .settings-card {
+          width: 100%; max-width: 420px; background: #fff; border-radius: 14px; padding: 26px; box-shadow: var(--shadow-lg);
+        }
+
+        @media (max-width: 860px) {
+          .auth-visual { display: none; }
+        }
+        @media (max-width: 640px) {
+          .cd-body { flex-direction: column; }
+          .cd-nav { width: 100%; flex-direction: row; border-right: none; border-bottom: 1px solid var(--line); overflow-x: auto; }
+          .nav-item { border-left: none; border-bottom: 2.5px solid transparent; }
+          .nav-item.active { border-left-color: transparent; border-bottom-color: var(--accent); }
+          .cd-main { padding: 22px 18px; }
+        }
+      `}</style>
+
+      {showSettings && (
+        <div className="settings-overlay">
+          <div className="settings-card">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="display" style={{ fontSize: 16, fontWeight: 600 }}>Connect your backend</h2>
+              {baseUrl && (
+                <button className="icon-btn" style={{ padding: 6 }} onClick={() => setShowSettings(false)}>
+                  <X size={15} />
+                </button>
+              )}
+            </div>
+            <p style={{ fontSize: 13, color: "var(--ink-soft)", marginBottom: 14, lineHeight: 1.5 }}>
+              Enter the base URL of your FastAPI backend (e.g. https://your-api.example.com or http://localhost:8000).
+            </p>
+            <label className="field-label">API base URL</label>
+            <input
+              className="field-input"
+              placeholder="http://localhost:8000"
+              value={urlDraft}
+              onChange={(e) => setUrlDraft(e.target.value)}
+            />
+            <button className="btn-primary" style={{ marginTop: 14 }} onClick={saveBaseUrl} disabled={!urlDraft.trim()}>
+              Save & continue
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="cd-topbar">
+        <div className="cd-brand">
+          <div className="cd-brand-mark"><Ticket size={15} strokeWidth={2.25} /></div>
+          <div className="cd-brand-text">
+            <div className="eyebrow">Complaint Management</div>
+            <h1 className="display">Frontdesk</h1>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {authed && (
+            <span className="mono" style={{ fontSize: 12, color: "var(--ink-soft)" }}>
+              <User size={12} style={{ display: "inline", marginRight: 4, verticalAlign: -2 }} />
+              {me.name} · {me.role}
+            </span>
+          )}
+          <button className="icon-btn" onClick={() => { setUrlDraft(baseUrl); setShowSettings(true); }}>
+            <Settings2 size={14} /> Backend
+          </button>
+          {authed && (
+            <button className="icon-btn" onClick={handleLogout}>
+              <LogOut size={14} /> Sign out
+            </button>
+          )}
+        </div>
+      </div>
+
+      {!authed ? (
+        <div className="auth-shell">
+          <div className="auth-visual">
+            <div className="auth-visual-content">
+              <div className="auth-visual-mark"><Ticket size={19} strokeWidth={2} /></div>
+              <h2>Complaints routed and resolved, without the back-and-forth.</h2>
+              <p>Submit an issue, get it automatically classified and sent to the right department, and track it through to resolution.</p>
+            </div>
+            <div className="auth-visual-foot">Frontdesk · Complaint Management</div>
+          </div>
+          <div className="auth-form-side">
+            <div className="auth-card">
+              <div className="auth-toggle">
+                <button className={authMode === "login" ? "active" : ""} onClick={() => { setAuthMode("login"); setAuthError(""); }}>
+                  Sign in
+                </button>
+                <button className={authMode === "signup" ? "active" : ""} onClick={() => { setAuthMode("signup"); setAuthError(""); }}>
+                  Create account
+                </button>
+              </div>
+              <h2 className="display" style={{ fontSize: 19, marginBottom: 4 }}>
+                {authMode === "login" ? "Welcome back" : "Set up your account"}
+              </h2>
+              <p style={{ fontSize: 13, color: "var(--ink-soft)", marginBottom: 20 }}>
+                {authMode === "login" ? "Sign in to submit or track your tickets." : "Takes a minute — you'll be signed in right after."}
+              </p>
+              <form onSubmit={handleAuthSubmit}>
+                {authMode === "signup" && (
+                  <div style={{ marginBottom: 14 }}>
+                    <label className="field-label">Full name</label>
+                    <input
+                      className="field-input" required minLength={1} maxLength={100}
+                      value={authForm.name}
+                      onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })}
+                    />
+                  </div>
+                )}
+                <div style={{ marginBottom: 14 }}>
+                  <label className="field-label">Email</label>
+                  <input
+                    className="field-input" type="email" required
+                    value={authForm.email}
+                    onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+                  />
+                </div>
+                <div style={{ marginBottom: 4 }}>
+                  <label className="field-label">Password</label>
+                  <input
+                    className="field-input" type="password" required minLength={8} maxLength={72}
+                    value={authForm.password}
+                    onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                  />
+                </div>
+                <button className="btn-primary" style={{ marginTop: 18 }} disabled={authLoading || !baseUrl}>
+                  {authLoading ? <Loader2 size={15} className="animate-spin" /> : authMode === "login" ? <LogIn size={15} /> : <UserPlus size={15} />}
+                  {authMode === "login" ? "Sign in" : "Create account & sign in"}
+                </button>
+                {!baseUrl && <p style={{ fontSize: 12, color: "var(--urgent)", marginTop: 10 }}>Set your backend URL above first.</p>}
+                {authError && (
+                  <div className="banner banner-error"><AlertCircle size={14} style={{ marginTop: 1 }} /> {authError}</div>
+                )}
+              </form>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="cd-body">
+          <div className="cd-nav">
+            <button className={`nav-item ${tab === "new" ? "active" : ""}`} onClick={() => setTab("new")}>
+              <Plus size={15} /> New ticket
+            </button>
+            <button className={`nav-item ${tab === "mine" ? "active" : ""}`} onClick={() => setTab("mine")}>
+              <ClipboardList size={15} /> My tickets
+            </button>
+          </div>
+
+          <div className="cd-main">
+            {tab === "new" && (
+              <div className="panel">
+                <div className="section-head">
+                  <div className="section-head-icon"><Plus size={16} strokeWidth={2.25} /></div>
+                  <div>
+                    <span className="eyebrow">Submit a complaint</span>
+                    <h2 className="display">What needs fixing?</h2>
+                  </div>
+                </div>
+                <form onSubmit={handleComplaintSubmit}>
+                  <div style={{ marginBottom: 12 }}>
+                    <label className="field-label">Title</label>
+                    <input
+                      className="field-input" required minLength={1} maxLength={200}
+                      placeholder="e.g. Leaking pipe in Block C washroom"
+                      value={complaintForm.title}
+                      onChange={(e) => setComplaintForm({ ...complaintForm, title: e.target.value })}
+                    />
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <label className="field-label">Location</label>
+                    <input
+                      className="field-input" required minLength={1} maxLength={100}
+                      placeholder="e.g. Hostel Block C, 2nd floor"
+                      value={complaintForm.location}
+                      onChange={(e) => setComplaintForm({ ...complaintForm, location: e.target.value })}
+                    />
+                  </div>
+                  <div style={{ marginBottom: 4 }}>
+                    <label className="field-label">Description</label>
+                    <textarea
+                      className="field-textarea" required minLength={1} maxLength={2000}
+                      placeholder="Describe the issue in detail — this is what the AI reads to route your ticket."
+                      value={complaintForm.description}
+                      onChange={(e) => setComplaintForm({ ...complaintForm, description: e.target.value })}
+                    />
+                  </div>
+                  <button className="btn-primary" style={{ marginTop: 16 }} disabled={submitLoading}>
+                    {submitLoading ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
+                    Submit ticket
+                  </button>
+                  {submitError && (
+                    <div className="banner banner-error"><AlertCircle size={14} style={{ marginTop: 1 }} /> {submitError}</div>
+                  )}
+                  {lastResult && (
+                    <div className="banner banner-success" style={{ display: "block" }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                        <CheckCircle2 size={14} style={{ marginTop: 1, flexShrink: 0 }} />
+                        <div>
+                          Ticket #{String(lastResult.complaint_id).padStart(5, "0")} submitted and routed automatically.
+                          <div style={{ marginTop: 6 }}>
+                            <span className="ai-tag">{lastResult.ai_result?.category}</span>
+                            <span className="ai-tag">{DEPT_LABEL[lastResult.ai_result?.department] || lastResult.ai_result?.department}</span>
+                            <span className="ai-tag" style={{ color: PRIORITY_STYLE[lastResult.ai_result?.priority] }}>
+                              {lastResult.ai_result?.priority} priority
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </form>
+              </div>
+            )}
+
+            {tab === "mine" && (
+              <div style={{ maxWidth: 680 }}>
+                <div className="section-head">
+                  <div className="section-head-icon"><ClipboardList size={16} strokeWidth={2.25} /></div>
+                  <div>
+                    <span className="eyebrow">Your history</span>
+                    <h2 className="display">My tickets</h2>
+                  </div>
+                </div>
+
+                {ticketsLoading && (
+                  <div className="empty-state"><Loader2 size={20} className="animate-spin" /></div>
+                )}
+                {!ticketsLoading && ticketsError && (
+                  <div className="banner banner-error"><AlertCircle size={14} style={{ marginTop: 1 }} /> {ticketsError}</div>
+                )}
+                {!ticketsLoading && !ticketsError && myTickets.length === 0 && (
+                  <div className="empty-state">
+                    <div className="empty-state-icon"><ClipboardList size={20} /></div>
+                    <p style={{ fontSize: 14 }}>No tickets yet — submit one from the New ticket tab.</p>
+                  </div>
+                )}
+                {!ticketsLoading && myTickets.map((c) => <TicketCard key={c.id} c={c} />)}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
